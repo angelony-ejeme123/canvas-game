@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mini Racer — HTML5 Canvas Game</title>
+  <style>
+    :root{--bg:#0b1220;--road:#333;--lane:#444;--car:#ff3b3b;--enemy:#00d1ff;--hud:#e6eef8}
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,var(--bg) 0%, #071021 100%);font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
+    #gameWrap{display:flex;align-items:center;justify-content:center;height:100%;padding:20px;box-sizing:border-box}
+    .card{width:100%;max-width:900px;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:14px;padding:12px;box-shadow:0 8px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03)}
+    #gameCanvas{width:100%;height:600px;display:block;background:transparent;border-radius:8px}
+    .controls{display:flex;justify-content:space-between;align-items:center;margin-top:10px;color:var(--hud);font-size:14px}
+    .btn{background:transparent;border:1px solid rgba(255,255,255,0.06);padding:8px 12px;border-radius:8px;color:var(--hud);cursor:pointer}
+    .btn:active{transform:translateY(1px)}
+    .mobile-controls{display:none;gap:12px}
+    .touch-btn{width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(4px);font-weight:700}
+    @media (max-width:700px){
+      #gameCanvas{height:70vh}
+      .mobile-controls{display:flex}
+      .controls .right{display:none}
+    }
+    /* small accessibility focus */
+    .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  </style>
+</head>
+<body>
+  <div id="gameWrap">
+    <div class="card">
+      <canvas id="gameCanvas" width="800" height="600" aria-label="Top-down racing game"></canvas>
+      <div class="controls">
+        <div>
+          <button id="startBtn" class="btn">Start</button>
+          <button id="pauseBtn" class="btn">Pause</button>
+          <button id="restartBtn" class="btn">Restart</button>
+        </div>
+        <div class="right">
+          <span id="scoreLabel">Score: 0</span>
+          <span style="margin-left:16px">Speed: <span id="speedLabel">0</span></span>
+        </div>
+      </div>
+      <div class="mobile-controls" style="margin-top:10px">
+        <div style="display:flex;align-items:center;gap:12px;flex:1;justify-content:center">
+          <div id="leftTouch" class="touch-btn">◀</div>
+          <div id="accelTouch" class="touch-btn">▲</div>
+          <div id="rightTouch" class="touch-btn">▶</div>
+        </div>
+      </div>
+      <p style="color:var(--hud);font-size:13px;margin-top:8px">Controls: ← → or A / D to steer. Up or W to accelerate. Space to boost. Avoid other cars and collect tokens.</p>
+    </div>
+  </div>
+
+  <script>
+    // Mini top-down infinite racer
+    (() => {
+      const canvas = document.getElementById('gameCanvas');
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height;
+
+      // DOM
+      const startBtn = document.getElementById('startBtn');
+      const pauseBtn = document.getElementById('pauseBtn');
+      const restartBtn = document.getElementById('restartBtn');
+      const scoreLabel = document.getElementById('scoreLabel');
+      const speedLabel = document.getElementById('speedLabel');
+
+      // mobile touches
+      const leftTouch = document.getElementById('leftTouch');
+      const rightTouch = document.getElementById('rightTouch');
+      const accelTouch = document.getElementById('accelTouch');
+
+      let keys = {};
+      let gameState = 'stopped'; // 'running','paused','stopped','gameover'
+
+      // Game parameters
+      const road = {x: W*0.15, width: W*0.7, lanes:3};
+      const laneWidth = road.width / road.lanes;
+
+      const player = {
+        x: W/2,
+        y: H - 130,
+        w: 36,
+        h: 64,
+        lane: 1, // 0..lanes-1
+        speed: 0,
+        maxSpeed: 10,
+        accel: 0.15,
+        decel: 0.25,
+        color: getComputedStyle(document.documentElement).getPropertyValue('--car') || '#ff3b3b'
+      };
+
+      let enemies = []; // other cars
+      let tokens = []; // collectible tokens
+      let lines = [];
+      let frame = 0;
+      let score = 0;
+      let baseSpeed = 3; // world scroll speed
+      let difficultyTimer = 0;
+      let highScore = 0;
+
+      // Utilities
+      function rand(min,max){return Math.random()*(max-min)+min}
+      function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+
+      // Setup initial lane positions
+      function laneCenter(l){ return road.x + laneWidth*(l+0.5); }
+
+      // Create repeating road lines
+      function resetRoad(){
+        lines = [];
+        for(let i=0;i<20;i++){
+          lines.push({y:i*80, h:40});
+        }
+      }
+
+      function spawnEnemy(){
+        const lane = Math.floor(rand(0, road.lanes));
+        const speed = baseSpeed + rand(0,2);
+        enemies.push({lane, x: laneCenter(lane), y: -100, w:40, h:80, speed, color: getComputedStyle(document.documentElement).getPropertyValue('--enemy') || '#00d1ff' });
+      }
+
+      function spawnToken(){
+        const lane = Math.floor(rand(0, road.lanes));
+        tokens.push({lane, x: laneCenter(lane), y: -60, r:12, collected:false});
+      }
+
+      function resetGame(){
+        player.lane = Math.floor(road.lanes/2);
+        player.x = laneCenter(player.lane);
+        player.speed = 0;
+        enemies = [];
+        tokens = [];
+        frame = 0;
+        score = 0;
+        baseSpeed = 3;
+        difficultyTimer = 0;
+        resetRoad();
+        updateHUD();
+      }
+
+      function updateHUD(){
+        scoreLabel.textContent = 'Score: ' + Math.floor(score);
+        speedLabel.textContent = (player.speed + baseSpeed).toFixed(1);
+      }
+
+      // Input handling
+      window.addEventListener('keydown', e=>{ keys[e.key.toLowerCase()] = true; if(e.key === ' '){ e.preventDefault(); }});
+      window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
+
+      // Touch controls
+      leftTouch.addEventListener('touchstart', e=>{ e.preventDefault(); keys['arrowleft']=true; });
+      leftTouch.addEventListener('touchend', e=>{ e.preventDefault(); keys['arrowleft']=false; });
+      rightTouch.addEventListener('touchstart', e=>{ e.preventDefault(); keys['arrowright']=true; });
+      rightTouch.addEventListener('touchend', e=>{ e.preventDefault(); keys['arrowright']=false; });
+      accelTouch.addEventListener('touchstart', e=>{ e.preventDefault(); keys['arrowup']=true; });
+      accelTouch.addEventListener('touchend', e=>{ e.preventDefault(); keys['arrowup']=false; });
+
+      // Collision detection (AABB simplified)
+      function rectsCollide(a,b){
+        return Math.abs(a.x - b.x) < (a.w/2 + (b.w||b.r||0)) && Math.abs(a.y - b.y) < (a.h/2 + (b.h||b.r||0));
+      }
+
+      // Game loop
+      function update(dt){
+        if(gameState !== 'running') return;
+        frame++;
+        difficultyTimer += dt;
+
+        // accelerate / decel
+        if(keys['arrowup'] || keys['w']){
+          player.speed = clamp(player.speed + player.accel, 0, player.maxSpeed);
+        } else {
+          player.speed = clamp(player.speed - player.decel, 0, player.maxSpeed);
+        }
+
+        // steer
+        if((keys['arrowleft'] || keys['a'])){
+          player.lane = clamp(player.lane - 0.08, 0, road.lanes-1);
+        } else if((keys['arrowright'] || keys['d'])){
+          player.lane = clamp(player.lane + 0.08, 0, road.lanes-1);
+        }
+        // smooth lane follow
+        player.x += (laneCenter(Math.round(player.lane)) - player.x) * 0.25;
+
+        // boost mechanic
+        if(keys[' ']){ baseSpeed += 0.12; score += 0.4; } else { baseSpeed = Math.max(3, baseSpeed - 0.04); }
+
+        // update road lines
+        for(let ln of lines){
+          ln.y += baseSpeed + player.speed/2;
+          if(ln.y > H + ln.h) ln.y = -ln.h - rand(20,120);
+        }
+
+        // spawn enemies/tokens occasionally
+        if(frame % Math.floor(120 - clamp(score/10,0,80)) === 0){ spawnEnemy(); }
+        if(frame % 240 === 0) spawnToken();
+
+        // update enemies
+        for(let i=enemies.length-1;i>=0;i--){
+          const e = enemies[i];
+          e.y += e.speed + baseSpeed;
+          // simple lane change randomness
+          if(Math.random() < 0.001 + score/20000){ e.lane = clamp(Math.round(e.lane + (Math.random()>0.5?1:-1)), 0, road.lanes-1); e.x = laneCenter(e.lane);} 
+          // remove off-screen
+          if(e.y > H + 200) enemies.splice(i,1);
+        }
+
+        // update tokens
+        for(let i=tokens.length-1;i>=0;i--){
+          const t = tokens[i];
+          t.y += baseSpeed;
+          if(t.y > H + 50) tokens.splice(i,1);
+        }
+
+        // collisions
+        // represent player rect
+        const pRect = {x:player.x, y:player.y, w:player.w, h:player.h};
+        for(let i=enemies.length-1;i>=0;i--){
+          const e = enemies[i];
+          const eRect = {x:e.x, y:e.y, w:e.w, h:e.h};
+          if(rectsCollide(pRect,eRect)){
+            gameOver();
+            return;
+          }
+        }
+        for(let i=tokens.length-1;i>=0;i--){
+          const t = tokens[i];
+          const tRect = {x:t.x, y:t.y, w: t.r*2, h:t.r*2};
+          if(rectsCollide(pRect,tRect)){
+            score += 50;
+            tokens.splice(i,1);
+          }
+        }
+
+        // scoring
+        score += 0.3 + player.speed*0.05 + baseSpeed*0.02;
+        // slowly increase difficulty
+        if(difficultyTimer > 7000){ baseSpeed += 0.2; difficultyTimer = 0; }
+
+        updateHUD();
+      }
+
+      function draw(){
+        // sky gradient
+        ctx.clearRect(0,0,W,H);
+        const g = ctx.createLinearGradient(0,0,0,H);
+        g.addColorStop(0,'#071021'); g.addColorStop(1,'#0b1220');
+        ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+
+        // draw road
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--road') || '#333';
+        roundRect(ctx, road.x, 0, road.width, H, 18, true, false);
+
+        // lane separators
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--lane') || '#444';
+        ctx.fillRect(road.x,0,2,H);
+        ctx.fillRect(road.x + road.width-2,0,2,H);
+
+        // dashed center lines
+        ctx.fillStyle = '#cfd8e6';
+        for(let ln of lines){
+          const lx = road.x + road.width/2 - 6;
+          ctx.fillRect(lx, ln.y, 12, ln.h);
+        }
+
+        // tokens
+        for(let t of tokens){
+          drawToken(t.x, t.y, t.r);
+        }
+
+        // enemies
+        for(let e of enemies){
+          drawCar(e.x, e.y, e.w, e.h, e.color);
+        }
+
+        // player car
+        drawCar(player.x, player.y, player.w, player.h, player.color, true);
+
+        // HUD overlay
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.fillRect(12,12,190,56);
+        ctx.fillStyle = 'white';
+        ctx.font = '600 16px system-ui';
+        ctx.fillText('Score: ' + Math.floor(score), 22,34);
+        ctx.font = '400 12px system-ui';
+        ctx.fillText('Speed: ' + (player.speed + baseSpeed).toFixed(1), 22,54);
+
+        if(gameState === 'stopped'){
+          ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(W/2 - 220, H/2 - 70, 440, 140);
+          ctx.fillStyle = 'white'; ctx.textAlign = 'center'; ctx.font='700 28px system-ui'; ctx.fillText('Mini Racer', W/2, H/2 - 18);
+          ctx.font='400 14px system-ui'; ctx.fillText('Press Start to race. Arrow keys or A/D to move. Space to boost.', W/2, H/2 + 14);
+          ctx.textAlign = 'left';
+        }
+        if(gameState === 'gameover'){
+          ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(W/2 - 260, H/2 - 90, 520, 180);
+          ctx.fillStyle = 'white'; ctx.textAlign = 'center'; ctx.font='800 32px system-ui'; ctx.fillText('Game Over', W/2, H/2 - 12);
+          ctx.font='500 18px system-ui'; ctx.fillText('Final Score: ' + Math.floor(score), W/2, H/2 + 22);
+          ctx.font='400 14px system-ui'; ctx.fillText('Click Restart to play again', W/2, H/2 + 56);
+          ctx.textAlign = 'left';
+        }
+      }
+
+      function gameOver(){
+        gameState = 'gameover';
+        highScore = Math.max(highScore, score);
+        // small flash
+        flashScreen();
+      }
+
+      function flashScreen(){
+        const prev = ctx.getImageData(0,0,W,H);
+        ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(0,0,W,H);
+        setTimeout(()=>{ ctx.putImageData(prev,0,0); draw(); }, 90);
+      }
+
+      // Drawing helpers
+      function roundRect(ctx,x,y,w,h,r, fill, stroke){
+        if(typeof r === 'undefined') r=5;
+        ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+        if(fill) ctx.fill(); if(stroke) ctx.stroke();
+      }
+
+      function drawCar(x,y,w,h,color,isPlayer){
+        ctx.save(); ctx.translate(x,y);
+        // shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(-w/2+6, h/2+4, w-10, 8);
+        // body
+        ctx.fillStyle = color || '#ff3b3b'; roundRect(ctx,-w/2, -h/2, w, h, 8, true, false);
+        // windshield
+        ctx.fillStyle = 'rgba(255,255,255,0.12)'; roundRect(ctx,-w/2+6, -h/2+8, w-12, h/3, 6, true, false);
+        // headlights
+        ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(-w/2+6, h/2-16, 8,6); ctx.fillRect(w/2-14, h/2-16, 8,6);
+        // detail for player
+        if(isPlayer){ ctx.fillStyle = 'rgba(0,0,0,0.06)'; ctx.fillRect(-w/2+6, -h/6, w-12, h/5); }
+        ctx.restore();
+      }
+
+      function drawToken(x,y,r){
+        ctx.save(); ctx.translate(x,y);
+        ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.fillStyle='#ffd24a'; ctx.fill();
+        ctx.fillStyle='rgba(0,0,0,0.08)'; ctx.fillRect(-r/2, -r/2, r*1.5, r/3);
+        ctx.restore();
+      }
+
+      // main loop runner
+      let lastT = performance.now();
+      function tick(now){
+        const dt = now - lastT; lastT = now;
+        update(dt);
+        draw();
+        requestAnimationFrame(tick);
+      }
+
+      function updateButtons(){
+        if(gameState === 'running'){
+          startBtn.textContent = 'Stop';
+          pauseBtn.textContent = 'Pause';
+        } else if(gameState === 'paused'){
+          startBtn.textContent = 'Stop';
+          pauseBtn.textContent = 'Resume';
+        } else {
+          startBtn.textContent = 'Start';
+          pauseBtn.textContent = 'Pause';
+        }
+      }
+
+      // Buttons with touch support for mobile
+      function handleStart(){
+        if(gameState === 'running' || gameState === 'paused'){
+          gameState = 'stopped';
+        } else if(gameState === 'stopped' || gameState === 'gameover'){
+          resetGame();
+          gameState = 'running';
+        }
+        updateButtons();
+      }
+      function handlePause(){
+        if(gameState === 'running') gameState='paused';
+        else if(gameState === 'paused') gameState='running';
+        updateButtons();
+      }
+      function handleRestart(){
+        resetGame();
+        gameState='running';
+        updateButtons();
+      }
+
+      startBtn.addEventListener('click', handleStart);
+      startBtn.addEventListener('touchstart', (e) => { e.preventDefault(); handleStart(); });
+      pauseBtn.addEventListener('click', handlePause);
+      pauseBtn.addEventListener('touchstart', (e) => { e.preventDefault(); handlePause(); });
+      restartBtn.addEventListener('click', handleRestart);
+      restartBtn.addEventListener('touchstart', (e) => { e.preventDefault(); handleRestart(); });
+
+      // initialize
+      resetGame(); draw(); requestAnimationFrame(tick);
+
+      // expose some debug methods to window (handy for tinkering)
+      window.MINIRACER = {resetGame, spawnEnemy, spawnToken, getState:()=>({score,frame,gameState})};
+
+    })();
+  </script>
+</body>
+</html>
